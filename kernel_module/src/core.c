@@ -73,7 +73,7 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     struct blockmma_cmd cmd;
     copy_from_user(&cmd, user_cmd, sizeof(cmd));
     
-    tile = (int)user_cmd->tile;
+    tile = (int)cmd.tile;
     long output = (int)current->pid;;
     
     //find if c is already in linked list or not
@@ -83,7 +83,7 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     int createNewNode = 1;
     while(p)
     {
-        if(p->u_c == user_cmd->c)
+        if(p->u_c == cmd.c)
         {
             createNewNode = 0;
             if(p->finished == 0)
@@ -98,10 +98,8 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
                 int i;
                 for(i = 0; i < tile; i++)
                 {
-                    float *u_a = (float *)user_cmd->a;
-                    float *u_b = (float *)user_cmd->b;
-                    copy_from_user(p->k_a+i*tile, u_a+i*N, tile*sizeof(float));
-                    copy_from_user(p->k_b+i*tile, u_b+i*K, tile*sizeof(float));
+                    copy_from_user(p->k_a+i*tile, (float *)cmd.a+i*N, tile*sizeof(float));
+                    copy_from_user(p->k_b+i*tile, (float *)cmd.b+i*K, tile*sizeof(float));
                 }                    
                 p->finished = 0;
                 
@@ -120,29 +118,26 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     
     if(createNewNode)
     {
-        //printk("1: create new node!\n");
+        printk("1: create new node!\n");
         struct Node *p;
         p = kmalloc(sizeof(*p), GFP_ATOMIC);
-        int M = (int)user_cmd->m;
-        int N = (int)user_cmd->n;
-        int K = (int)user_cmd->k;
+        int M = (int)cmd.m;
+        int N = (int)cmd.n;
+        int K = (int)cmd.k;
         float *k_a = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
         float *k_b = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
         float *k_c = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
         int i;
         for(i = 0; i < tile; i++)
         { 
-            float *u_a = (float *)user_cmd->a;
-            float *u_b = (float *)user_cmd->b;
-            float *u_c = (float *)user_cmd->c;
-            copy_from_user(k_a+i*tile, u_a+i*N, tile*sizeof(float));
-            copy_from_user(k_b+i*tile, u_b+i*K, tile*sizeof(float));
-            copy_from_user(k_c+i*tile, u_c+i*K, tile*sizeof(float));
+            copy_from_user(k_a+i*tile, (float *)cmd.a+i*N, tile*sizeof(float));
+            copy_from_user(k_b+i*tile, (float *)cmd.b+i*K, tile*sizeof(float));
+            copy_from_user(k_c+i*tile, (float *)cmd.c+i*K, tile*sizeof(float));
         }
         p->k_a = k_a;
         p->k_b = k_b;
         p->k_c = k_c;
-        p->u_c = (float *)user_cmd->c;
+        p->u_c = (float *)cmd.c;
         p->m = M;
         p->n = N;
         p->k = K;
@@ -184,8 +179,7 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
             int K = p->k;
             for(i = 0; i < tile; i++)
             {
-                float *u_c = (float *)p->u_c;
-                copy_to_user(u_c+i*K, p->k_c+i*tile, tile*sizeof(float));
+                copy_to_user(p->u_c+i*K, p->k_c+i*tile, tile*sizeof(float));
             }
             
             //delete node
@@ -217,7 +211,7 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
     if(!foundOutstanding)
     {
         output = (int)current->pid;
-        //printk("4: all results are collected!\n");
+        printk("4: all results are collected!\n");
     }
     else
     {
@@ -232,6 +226,8 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
  */
 int blockmma_get_task(struct blockmma_hardware_cmd __user *user_cmd)
 {
+    struct blockmma_hardware_cmd cmd;
+    copy_from_user(&cmd, user_cmd, sizeof(cmd));
     int output;
     
     mutex_lock(&list_lock);
@@ -242,12 +238,9 @@ int blockmma_get_task(struct blockmma_hardware_cmd __user *user_cmd)
         int i;
         for(i = 0; i < tile; i++)
         { 
-            float *u_a = (float *)user_cmd->a;
-            float *u_b = (float *)user_cmd->b;
-            float *u_c = (float *)user_cmd->c;
-            copy_to_user(u_a+i*tile, queueHead->k_a+i*tile, tile*sizeof(float));
-            copy_to_user(u_b+i*tile, queueHead->k_b+i*tile, tile*sizeof(float));
-            copy_to_user(u_c+i*tile, queueHead->k_c+i*tile, tile*sizeof(float));
+            copy_to_user((float *)cmd.a+i*tile, queueHead->k_a+i*tile, tile*sizeof(float));
+            copy_to_user((float *)cmd.b+i*tile, queueHead->k_b+i*tile, tile*sizeof(float));
+            copy_to_user((float *)cmd.c+i*tile, queueHead->k_c+i*tile, tile*sizeof(float));
         }
 
         //update queue
@@ -263,12 +256,13 @@ int blockmma_get_task(struct blockmma_hardware_cmd __user *user_cmd)
     return output;
 }
 
-
 /**
  * Return until the task specified in the command is done.
  */
 int blockmma_comp(struct blockmma_hardware_cmd __user *user_cmd)
 {
+    struct blockmma_hardware_cmd cmd;
+    copy_from_user(&cmd, user_cmd, sizeof(cmd));
     struct Node *p;
     int found = 0;
     int output = 0;
@@ -277,14 +271,13 @@ int blockmma_comp(struct blockmma_hardware_cmd __user *user_cmd)
     p = head.next;
     while(p != NULL)
     {
-        if(p->mma_tid == user_cmd->tid)//TODO
+        if(p->mma_tid == cmd.tid)//TODO
         {
             found = 1;
             int i;
             for(i = 0; i < tile; i++)
             {
-                float *u_c = (float *)user_cmd->c;
-                copy_from_user(p->k_c+i*tile, u_c+i*tile, tile*sizeof(float));
+                copy_from_user(p->k_c+i*tile, (float *)cmd.c+i*tile, tile*sizeof(float));
             }
             p->finished = 1;
             break;
@@ -312,7 +305,7 @@ int blockmma_comp(struct blockmma_hardware_cmd __user *user_cmd)
 int blockmma_author(struct blockmma_hardware_cmd __user *user_cmd)
 {
     struct blockmma_hardware_cmd cmd;
-    char authors[] = "R9";
+    char authors[] = "Yitong Dai";
     if (copy_from_user(&cmd, user_cmd, sizeof(cmd)))
     {
         return -1;
