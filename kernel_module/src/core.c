@@ -74,7 +74,8 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     copy_from_user(&cmd, user_cmd, sizeof(cmd));
     
     tile = (int)cmd.tile;
-    long output = (int)current->pid;;
+    long output = (int)current->pid;
+    int m_pid = (int)current->pid;
     
     //find if c is already in linked list or not
     mutex_lock(&list_lock);
@@ -83,7 +84,7 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     int createNewNode = 1;
     while(p)
     {
-        if(p->u_c == cmd.c)
+        if(p->u_c == (float*)cmd.c)
         {
             createNewNode = 0;
             if(p->finished == 0)
@@ -104,12 +105,24 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
                 p->finished = 0;
                 
                 //put node at the end of queue
-                p->prev->next = p->next;
-                p->next->prev = p->prev;
-                tail->next = p;
-                p->prev = tail;
-                p->next = NULL;
-                tail = p;
+                if(p->next == NULL)
+                {
+                    queueHead = p;
+                }
+                else
+                {
+                    p->prev->next = p->next;
+                    p->next->prev = p->prev;
+                    
+                    tail->next = p;
+                    p->prev = tail;
+                    p->next = NULL;
+                    tail = p;
+                    if (queueHead == NULL)
+                    {
+                        queueHead = p;
+                    }
+                } 
             }
             break;
         }
@@ -118,7 +131,7 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     
     if(createNewNode)
     {
-        printk("1: create new node!\n");
+        //printk("1: create new node!\n");
         struct Node *p;
         p = kmalloc(sizeof(*p), GFP_ATOMIC);
         int M = (int)cmd.m;
@@ -173,10 +186,10 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
     while(p != NULL)
     {
         if(p->user_tid == m_tid && p->finished)
-        {
-            int i;
+        { 
             //printk("4: kernel finds what to return!\n");
             int K = p->k;
+            int i;
             for(i = 0; i < tile; i++)
             {
                 copy_to_user(p->u_c+i*K, p->k_c+i*tile, tile*sizeof(float));
@@ -211,7 +224,7 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
     if(!foundOutstanding)
     {
         output = (int)current->pid;
-        printk("4: all results are collected!\n");
+        //printk("4: all results are collected!\n");
     }
     else
     {
@@ -271,7 +284,7 @@ int blockmma_comp(struct blockmma_hardware_cmd __user *user_cmd)
     p = head.next;
     while(p != NULL)
     {
-        if(p->mma_tid == cmd.tid)//TODO
+        if(p->mma_tid == (int)cmd.tid && p->finished != 1)//TODO
         {
             found = 1;
             int i;
