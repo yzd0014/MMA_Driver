@@ -84,7 +84,7 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
     int createNewNode = 1;
     while(p)
     {
-        if(p->u_c == (float*)cmd.c)
+        if(p->user_tid == m_pid && p->u_c == (float*)cmd.c)
         {
             createNewNode = 0;
             if(p->finished == 0)
