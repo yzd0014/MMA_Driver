@@ -34,7 +34,6 @@
 int blockmma(int devfd, float *a, float *b, float *c, int M, int N, int K)
 {
   int i, j, k;
-  
   for(i = 0; i < M; i+=128)
   {
     for(j = 0; j < N; j+=128)
@@ -42,7 +41,6 @@ int blockmma(int devfd, float *a, float *b, float *c, int M, int N, int K)
       for(k = 0; k < K; k+=128)
       {
         blockmma_f128(devfd, &a[i*N+j], &b[j*K+k], &c[i*K+k], M, N, K, 128);
-        //printf("user's a: %f\n", a[(i+1)*N+j+1]);
       }
       blockmma_sync(devfd);
     }
@@ -117,7 +115,6 @@ int blockmma_f128_accelerator(int devfd)
     {
         if((tid=ioctl(devfd, BLOCKMMA_IOCTL_GET_TASK, &cmd))>=0)
         {
-            //printf("mma's a: %f\n", a[129]);
             for(i = 0; i < 128; i++)
                 for(j = 0; j < 128; j++)
                     for(k = 0; k < 128; k++)
