@@ -46,12 +46,130 @@
 #include "core.h"
 
 extern struct miscdevice blockmma_dev;
+static struct Node
+{
+    float *k_a;
+    float *k_b;
+    float *k_c;
+    float *u_c;
+    int m;
+    int n;
+    int k;
+    int mma_tid;//this is used to make sure resutls from mma is send to correct bucket in kernel
+    int user_tid;
+    int finished; 
+    struct Node *next;
+    struct Node *prev;
+} head;
+static struct Node *tail;
+static struct Node *queueHead;
+static int tile;
+struct mutex list_lock;
 /**
  * Enqueue a task for the caller/accelerator to perform computation.
  */
 long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
 {
-    return 0;
+    struct blockmma_cmd cmd;
+    copy_from_user(&cmd, user_cmd, sizeof(cmd));
+    
+    tile = (int)cmd.tile;
+    long output = (int)current->pid;
+    int m_pid = (int)current->pid;
+    
+    //find if c is already in linked list or not
+    mutex_lock(&list_lock);
+    struct Node *p;
+    p = head.next;
+    int createNewNode = 1;
+    while(p)
+    {
+        if(p->user_tid == m_pid && p->u_c == (float*)cmd.c)
+        {
+            createNewNode = 0;
+            if(p->finished == 0)
+            {
+                output = -1;
+            }
+            else
+            {
+                int N = p->n;
+                int K = p->k;
+                //update node
+                int i;
+                for(i = 0; i < tile; i++)
+                {
+                    copy_from_user(p->k_a+i*tile, (float *)cmd.a+i*N, tile*sizeof(float));
+                    copy_from_user(p->k_b+i*tile, (float *)cmd.b+i*K, tile*sizeof(float));
+                }                    
+                p->finished = 0;
+                
+                //put node at the end of queue
+                if(p->next == NULL)
+                {
+                    queueHead = p;
+                }
+                else
+                {
+                    p->prev->next = p->next;
+                    p->next->prev = p->prev;
+                    
+                    tail->next = p;
+                    p->prev = tail;
+                    p->next = NULL;
+                    tail = p;
+                    if (queueHead == NULL)
+                    {
+                        queueHead = p;
+                    }
+                } 
+            }
+            break;
+        }
+        p = p->next;
+    }
+    
+    if(createNewNode)
+    {
+        //printk("1: create new node!\n");
+        struct Node *p;
+        p = kmalloc(sizeof(*p), GFP_ATOMIC);
+        int M = (int)cmd.m;
+        int N = (int)cmd.n;
+        int K = (int)cmd.k;
+        float *k_a = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
+        float *k_b = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
+        float *k_c = kmalloc(sizeof(float)*tile*tile, GFP_ATOMIC);
+        int i;
+        for(i = 0; i < tile; i++)
+        { 
+            copy_from_user(k_a+i*tile, (float *)cmd.a+i*N, tile*sizeof(float));
+            copy_from_user(k_b+i*tile, (float *)cmd.b+i*K, tile*sizeof(float));
+            copy_from_user(k_c+i*tile, (float *)cmd.c+i*K, tile*sizeof(float));
+        }
+        p->k_a = k_a;
+        p->k_b = k_b;
+        p->k_c = k_c;
+        p->u_c = (float *)cmd.c;
+        p->m = M;
+        p->n = N;
+        p->k = K;
+        p->mma_tid = -1;//TODO
+        p->user_tid = (int)current->pid;
+        p->finished = 0;
+        p->next = NULL;
+        p->prev = tail;
+        tail->next = p;
+        tail = p;
+        if(queueHead == NULL)
+        {
+            queueHead = p;
+        }
+    }
+    mutex_unlock(&list_lock);
+    
+    //printk("1: exit send task lock!\n");
+    return output;
 }
 
 /**
@@ -59,7 +177,61 @@ long blockmma_send_task(struct blockmma_cmd __user *user_cmd)
  */
 int blockmma_sync(struct blockmma_cmd __user *user_cmd)
 {
-    return 0;
+    int foundOutstanding = 0;
+    int output = 0;
+    int m_tid = (int)current->pid;
+    
+    mutex_lock(&list_lock);
+    struct Node *p = head.next;
+    while(p != NULL)
+    {
+        if(p->user_tid == m_tid && p->finished)
+        { 
+            //printk("4: kernel finds what to return!\n");
+            int K = p->k;
+            int i;
+            for(i = 0; i < tile; i++)
+            {
+                copy_to_user(p->u_c+i*K, p->k_c+i*tile, tile*sizeof(float));
+            }
+            
+            //delete node
+            if(p == tail)
+            {
+               tail = p->prev; 
+            } 
+            p->prev->next = p->next;
+            if(p->next != NULL) p->next->prev = p->prev;
+            struct Node* temp = p->next;
+            kfree(p->k_a);
+            kfree(p->k_b);
+            kfree(p->k_c);
+            kfree(p);
+            p = temp;
+        }
+        else if (p->user_tid == m_tid && !p->finished)
+        {
+            foundOutstanding = 1;
+            break;
+        }
+        else
+        {
+            p = p->next;
+        }
+    }
+    mutex_unlock(&list_lock);
+    
+    if(!foundOutstanding)
+    {
+        output = (int)current->pid;
+        //printk("4: all results are collected!\n");
+    }
+    else
+    {
+        output = -1;
+    }
+    
+    return output;
 }
 
 /**
@@ -67,25 +239,86 @@ int blockmma_sync(struct blockmma_cmd __user *user_cmd)
  */
 int blockmma_get_task(struct blockmma_hardware_cmd __user *user_cmd)
 {
-    return 0;
-}
+    struct blockmma_hardware_cmd cmd;
+    copy_from_user(&cmd, user_cmd, sizeof(cmd));
+    int output;
+    
+    mutex_lock(&list_lock);
+    if(queueHead)
+    {
+        output = (int)current->pid;
+        queueHead->mma_tid = output;//TODO
+        int i;
+        for(i = 0; i < tile; i++)
+        { 
+            copy_to_user((float *)cmd.a+i*tile, queueHead->k_a+i*tile, tile*sizeof(float));
+            copy_to_user((float *)cmd.b+i*tile, queueHead->k_b+i*tile, tile*sizeof(float));
+            copy_to_user((float *)cmd.c+i*tile, queueHead->k_c+i*tile, tile*sizeof(float));
+        }
 
+        //update queue
+        queueHead = queueHead->next;
+        //printk("2: mma gets a task!\n");
+    }
+    else
+    {
+        output = -1;
+    }
+    mutex_unlock(&list_lock);
+    
+    return output;
+}
 
 /**
  * Return until the task specified in the command is done.
  */
 int blockmma_comp(struct blockmma_hardware_cmd __user *user_cmd)
 {
-    return 0;
+    struct blockmma_hardware_cmd cmd;
+    copy_from_user(&cmd, user_cmd, sizeof(cmd));
+    struct Node *p;
+    int found = 0;
+    int output = 0;
+    
+    mutex_lock(&list_lock);
+    p = head.next;
+    while(p != NULL)
+    {
+        if(p->mma_tid == (int)cmd.tid && p->finished != 1)//TODO
+        {
+            found = 1;
+            int i;
+            for(i = 0; i < tile; i++)
+            {
+                copy_from_user(p->k_c+i*tile, (float *)cmd.c+i*tile, tile*sizeof(float));
+            }
+            p->finished = 1;
+            break;
+        }   
+        p = p->next;
+    }
+    mutex_unlock(&list_lock);
+    
+    if(found)
+    {
+        output = (int)current->pid;
+        //printk("3: kernel get results from mma!\n");
+    }
+    else
+    {
+        output = -1;
+        printk("blockmma_comp fails!\n");
+    }
+    return output;
 }
 
 /*
- * Tell us who wrote the module
+ * Tell us who wrote the modulead
  */
 int blockmma_author(struct blockmma_hardware_cmd __user *user_cmd)
 {
     struct blockmma_hardware_cmd cmd;
-    char authors[] = "Yu-Chia Liu (yliu719), 987654321 and Hung-Wei Tseng (htseng), 123456789";
+    char authors[] = "Yitong Dai";
     if (copy_from_user(&cmd, user_cmd, sizeof(cmd)))
     {
         return -1;
@@ -102,12 +335,21 @@ int blockmma_init(void)
         printk(KERN_ERR "Unable to register \"blockmma\" misc device\n");
         return ret;
     }
+    mutex_init(&list_lock);
+    head.next = NULL;
+    head.prev = NULL;
+    tail = &head;
+    queueHead = head.next;
     printk("BlockMMA kernel module installed\n");
     return ret;
 }
 
 void blockmma_exit(void)
 {
+    if(head.next != NULL)
+    {
+        printk("Not all memory is released!\n");
+    }
     printk("BlockMMA removed\n");
     misc_deregister(&blockmma_dev);
 }
